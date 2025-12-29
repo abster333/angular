@@ -199,3 +199,220 @@ describe('HttpXsrfCookieExtractor', () => {
 function getParseCount(extractor: HttpXsrfCookieExtractor): number {
   return (extractor as any).parseCount;
 }
+
+/**
+ * Security Test: XSRF Edge Cases
+ *
+ * These tests verify that the XSRF interceptor correctly handles edge cases
+ * that could lead to token leakage to unintended origins.
+ *
+ * Related vulnerability: GHSA-58c5-g7wp-6w37 (Nov 2025) - Protocol-relative URL bypass
+ */
+describe('HttpXsrfInterceptor edge cases', () => {
+  let backend: HttpClientTestingBackend;
+  let interceptor: HttpXsrfInterceptor;
+
+  function setupInterceptor(startUrl: string) {
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({
+      providers: [
+        {
+          provide: HttpXsrfTokenExtractor,
+          useValue: new SampleTokenExtractor('secret-token'),
+        },
+        {
+          provide: XSRF_HEADER_NAME,
+          useValue: 'X-XSRF-TOKEN',
+        },
+        {
+          provide: XSRF_ENABLED,
+          useValue: true,
+        },
+        {
+          provide: PlatformLocation,
+          useFactory: () => new MockPlatformLocation({startUrl}),
+        },
+        HttpXsrfInterceptor,
+      ],
+    });
+    interceptor = TestBed.inject(HttpXsrfInterceptor);
+    backend = new HttpClientTestingBackend();
+  }
+
+  afterEach(() => {
+    backend.verify();
+  });
+
+  describe('port isolation', () => {
+    it('should NOT add token for same host but different port', () => {
+      setupInterceptor('http://example.com:80/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://example.com:8080/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://example.com:8080/api');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+
+    it('should add token for same host and same port', () => {
+      setupInterceptor('http://example.com:8080/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://example.com:8080/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://example.com:8080/api');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeTrue();
+      req.flush({});
+    });
+
+    it('should add token for same host with implicit default port (HTTP)', () => {
+      setupInterceptor('http://example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://example.com:80/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://example.com:80/api');
+      // Both resolve to http://example.com (port 80 is default for HTTP)
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeTrue();
+      req.flush({});
+    });
+
+    it('should add token for same host with implicit default port (HTTPS)', () => {
+      setupInterceptor('https://example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'https://example.com:443/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('https://example.com:443/api');
+      // Both resolve to https://example.com (port 443 is default for HTTPS)
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeTrue();
+      req.flush({});
+    });
+  });
+
+  describe('subdomain isolation', () => {
+    it('should NOT add token for different subdomain', () => {
+      setupInterceptor('http://app.example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://api.example.com/data', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://api.example.com/data');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+
+    it('should NOT add token for parent domain', () => {
+      setupInterceptor('http://sub.example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://example.com/data', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://example.com/data');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+
+    it('should NOT add token for child subdomain', () => {
+      setupInterceptor('http://example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://sub.example.com/data', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://sub.example.com/data');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+  });
+
+  describe('IPv6 addresses', () => {
+    it('should add token for same IPv6 origin', () => {
+      setupInterceptor('http://[::1]:3000/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://[::1]:3000/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://[::1]:3000/api');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeTrue();
+      req.flush({});
+    });
+
+    it('should NOT add token for different IPv6 address', () => {
+      setupInterceptor('http://[::1]:3000/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://[2001:db8::1]:3000/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://[2001:db8::1]:3000/api');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+  });
+
+  describe('special URL schemes', () => {
+    it('should NOT add token for data: URL', () => {
+      setupInterceptor('http://example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'data:text/plain,hello', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('data:text/plain,hello');
+      // data: URLs have null origin, should not match
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+
+    it('should NOT add token for blob: URL with different origin', () => {
+      setupInterceptor('http://example.com/');
+      // blob: URLs inherit origin from creator, but if we parse a cross-origin blob URL
+      // the origin would differ
+      interceptor
+        .intercept(new HttpRequest('POST', 'blob:http://other.com/uuid', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('blob:http://other.com/uuid');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+  });
+
+  describe('malformed URLs', () => {
+    it('should NOT add token for invalid URL (graceful handling)', () => {
+      setupInterceptor('http://example.com/');
+      // Invalid URL that would throw in new URL()
+      interceptor
+        .intercept(new HttpRequest('POST', '///:invalid', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('///:invalid');
+      // Should handle gracefully without throwing, token not added
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+  });
+
+  describe('hostname case sensitivity', () => {
+    it('should add token for same host with different case', () => {
+      setupInterceptor('http://EXAMPLE.COM/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://example.com/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://example.com/api');
+      // Hostnames are case-insensitive, URL parser normalizes to lowercase
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeTrue();
+      req.flush({});
+    });
+  });
+
+  describe('protocol mismatch', () => {
+    it('should NOT add token for HTTP to HTTPS (different origin)', () => {
+      setupInterceptor('http://example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'https://example.com/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('https://example.com/api');
+      // http://example.com !== https://example.com (different protocol = different origin)
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+
+    it('should NOT add token for HTTPS to HTTP (different origin)', () => {
+      setupInterceptor('https://example.com/');
+      interceptor
+        .intercept(new HttpRequest('POST', 'http://example.com/api', {}), backend)
+        .subscribe();
+      const req = backend.expectOne('http://example.com/api');
+      expect(req.request.headers.has('X-XSRF-TOKEN')).toBeFalse();
+      req.flush({});
+    });
+  });
+});

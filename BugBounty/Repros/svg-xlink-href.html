@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SVG xlink:href execution probe</title>
+    <style>
+      body { font-family: sans-serif; }
+      .row { margin: 12px 0; }
+      svg { border: 1px solid #ccc; margin-right: 8px; }
+      code { background: #f4f4f4; padding: 2px 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>SVG xlink:href execution probe</h1>
+    <p>
+      Open this file in a browser and watch for alerts or console logs.
+      If any alert fires, note which case triggered it.
+    </p>
+
+    <div class="row">
+      <div>Case A: &lt;use&gt; with <code>xlink:href</code> = <code>javascript:alert('use')</code></div>
+      <svg width="120" height="30" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <rect id="box" x="0" y="0" width="20" height="20" fill="#4caf50"></rect>
+        </defs>
+        <use id="use-js" xlink:href="javascript:alert('use')"></use>
+      </svg>
+    </div>
+
+    <div class="row">
+      <div>Case B: &lt;image&gt; with <code>xlink:href</code> = <code>javascript:alert('image')</code></div>
+      <svg width="120" height="30" xmlns="http://www.w3.org/2000/svg">
+        <image id="img-js" xlink:href="javascript:alert('image')" width="20" height="20"></image>
+      </svg>
+    </div>
+
+    <div class="row">
+      <div>Case C: &lt;image&gt; with <code>xlink:href</code> = data SVG that calls <code>alert</code> onload</div>
+      <svg width="120" height="30" xmlns="http://www.w3.org/2000/svg">
+        <image id="img-data" width="20" height="20"></image>
+      </svg>
+    </div>
+
+    <script>
+      const dataSvg = "data:image/svg+xml," +
+        encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' onload=\"alert('data-svg')\"></svg>");
+      document.getElementById('img-data').setAttributeNS(
+        'http://www.w3.org/1999/xlink',
+        'xlink:href',
+        dataSvg,
+      );
+
+      console.log('Probe loaded. If no alerts fired, SVG xlink:href did not execute.');
+    </script>
+  </body>
+</html>
