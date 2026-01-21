@@ -18,11 +18,48 @@ If an attacker can influence `Host` or `X‑Forwarded‑Host` headers, **relativ
 
 ---
 
+## Concrete Impact (from repros)
+- **Data exfiltration into SSR HTML:** Both repros show the SSR response containing `INTERNAL_SECRET_123` when the `Host` header is set to the internal service, demonstrating server‑side access to internal data and inclusion in rendered HTML.
+- **Practical exploitability on Angular SSR defaults:** The stock ngmodule SSR example (no code changes) can be steered to fetch `/api-2` from the attacker‑chosen host when a relative request is made during SSR.
+**This is not a “request‑only” SSRF:** the repros show internal data flowing back into the rendered HTML, which is attacker‑visible.
+
+---
+
+## Attack Scenario (who / how / impact)
+**Attacker:** Any remote client who can send requests to the SSR endpoint (no auth required).  
+**Goal:** Exfiltrate internal data reachable only from the SSR server (e.g., localhost/private network services).  
+**How it plays out:**
+1) Attacker sends a request with a crafted `Host` (or `X‑Forwarded‑Host` via misconfigured proxy).
+2) Angular SSR uses the header‑derived base URL to resolve relative `HttpClient` calls during render.
+3) SSR performs a server‑side request to the attacker‑chosen internal host and embeds the response into HTML.
+4) Attacker receives the SSR HTML and extracts the internal data (or infers it via timing).
+
+---
+
 ## Preconditions (all required)
 1) SSR app performs **relative** `HttpClient` requests during SSR  
 2) SSR base URL is derived from request headers (Host/Forwarded)  
 3) Attacker can influence those headers (directly or via misconfigured proxies)  
 4) SSR response or timing is observable by the attacker  
+
+---
+
+## Attacker Control & “Against Other Users” Framing
+**Who controls the headers:** Attackers can supply arbitrary `Host` headers in direct requests, or influence `X‑Forwarded‑Host` / `X‑Forwarded‑Proto` when proxies or load balancers are misconfigured to trust unvalidated values.  
+
+**How this affects other users:** In multi‑tenant SSR or shared SSR infrastructure, an attacker can force the server to fetch internal data during SSR and have it rendered into the HTML response that the attacker receives. This is a server‑side impact that does not require compromising a victim user’s browser.
+
+---
+
+## Tested Versions / Environment
+- Angular repo version: **21.1.0-next.4** (`package.json`)
+- @angular/ssr: **21.1.0-next.2** (`node_modules/@angular/ssr/package.json`)
+- Node.js: **v24.4.1**
+
+---
+
+## Relationship to V‑001
+V‑001 documents the core platform‑server issue: `INITIAL_CONFIG.url` is accepted without validation and is used to resolve **relative** SSR `HttpClient` requests. This report shows the **concrete exploit path** in Angular‑supplied SSR scaffolding and the Node SSR adapter that commonly **populate `INITIAL_CONFIG.url` from untrusted Host/Forwarded headers**, making the V‑001 issue reachable in default setups.
 
 ---
 
@@ -56,11 +93,57 @@ These sources establish that Angular‑supplied code **derives SSR base URL from
 
 ---
 
+## Why this is security‑relevant default behavior
+Angular’s official SSR templates and the Node adapter build the SSR request URL from incoming headers by default. This makes the header‑derived base URL the **de facto default** for SSR setups, so apps that follow the scaffolded patterns inherit the risk unless they explicitly pin or validate the origin.
+
+---
+
+## Data‑flow chain (header → SSR `HttpClient` request)
+1) **Header‑derived URL is built** in Angular‑supplied server code:
+   - CLI server template: `node_modules/@schematics/angular/ssr/files/server-builder/server.ts.template`
+   - Node SSR adapter: `node_modules/@angular/ssr/fesm2022/node.mjs` (`createRequestUrl`)
+2) That URL becomes `INITIAL_CONFIG.url`, feeding `ServerPlatformLocation`:
+   - `packages/platform-server/src/location.ts` (constructor assigns protocol/hostname/port from `config.url`)
+3) **Relative SSR HttpClient requests are rewritten** against that base:
+   - `packages/platform-server/src/http.ts` (`relativeUrlsTransformerInterceptorFn`)
+
+---
+
 ## Repro Evidence (local, controlled)
+### Quick Repro (minimal)
+1) Start the minimal SSR repro (from repo root):
+```bash
+corepack pnpm ts-node --transpile-only --project BugBounty/Repros/ssrf-ssr-app/tsconfig.json BugBounty/Repros/ssrf-ssr-app/server.ts
+```
+2) Trigger SSRF via Host header:
+```bash
+curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4400/
+```
+**Expected:** HTML includes `INTERNAL_SECRET_123`.
+
+---
 
 ### A) Minimal SSR app repro
 **Location:** `BugBounty/Repros/ssrf-ssr-app`  
 **What it shows:** Host‑header‑derived SSR base causes SSR `HttpClient.get('/secret')` to resolve to attacker‑chosen internal host.
+
+**Setup (from repo root):**
+```bash
+mkdir -p BugBounty/Repros/ssrf-ssr-app/node_modules/@angular
+ln -sfn dist/packages-dist/common BugBounty/Repros/ssrf-ssr-app/node_modules/@angular/common
+ln -sfn dist/packages-dist/core BugBounty/Repros/ssrf-ssr-app/node_modules/@angular/core
+ln -sfn dist/packages-dist/platform-browser BugBounty/Repros/ssrf-ssr-app/node_modules/@angular/platform-browser
+ln -sfn dist/packages-dist/platform-server BugBounty/Repros/ssrf-ssr-app/node_modules/@angular/platform-server
+mkdir -p dist/packages-dist/node_modules/@angular
+ln -sfn dist/packages-dist/common dist/packages-dist/node_modules/@angular/common
+ln -sfn dist/packages-dist/core dist/packages-dist/node_modules/@angular/core
+ln -sfn dist/packages-dist/platform-browser dist/packages-dist/node_modules/@angular/platform-browser
+ln -sfn dist/packages-dist/platform-server dist/packages-dist/node_modules/@angular/platform-server
+corepack pnpm ts-node --transpile-only --project BugBounty/Repros/ssrf-ssr-app/tsconfig.json BugBounty/Repros/ssrf-ssr-app/server.ts
+```
+This starts:
+- Internal server: `http://127.0.0.1:4401/secret`
+- SSR server: `http://127.0.0.1:4400/`
 
 **Exploit demo:**
 ```bash
@@ -71,6 +154,18 @@ curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4400/
 ### B) Stock ngmodule SSR example repro
 **Location:** `BugBounty/Repros/ssrf-stock-ngmodule`  
 **What it shows:** Angular’s own ngmodule SSR example is exploitable with Host header + relative SSR fetch (`/api-2`).
+
+**Setup (terminal A, repo root):**
+```bash
+corepack pnpm -C integration/platform-server install
+corepack pnpm -C integration/platform-server build:ngmodule
+corepack pnpm -C integration/platform-server serve:ngmodule
+```
+
+**Internal mock API (terminal B):**
+```bash
+node BugBounty/Repros/ssrf-stock-ngmodule/internal-api.js
+```
 
 **Exploit demo:**
 ```bash
@@ -89,15 +184,18 @@ Angular SSR constructs the SSR request URL from request headers (`Host`, `X‑Fo
 **Default rating: Medium (CVSS ~5.3)**  
 Vector suggestion: `AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N`  
 
-Escalate only with evidence of high‑value data exposure in a real deployment.
+**Rationale vs prior report:** The earlier report used **Medium–High** when tying the issue to sensitive data exposure (e.g., metadata credentials) in a real deployment. This v2 report keeps **Medium** as a default because impact depends on app‑specific SSR data fetches and observable responses.  
+
+Escalate severity if evidence shows SSR fetches sensitive internal endpoints (e.g., metadata, internal APIs) and the data is exposed in rendered HTML or other attacker‑visible channels.
+
+**Current evidence level:** The local repros demonstrate internal data exfiltration into HTML, which supports **Medium**. Without proof of high‑value data exposure in a production deployment, escalation to Medium–High remains conditional.
 
 ---
 
 ## Recommendations (practical and non‑breaking)
-1) **Update Angular‑supplied templates** to avoid `headers.host` by default.  
-   Use a **trusted origin** (env/allowlist) or a new token (e.g., `SERVER_URL`) that pins SSR base URL.
-2) **Document the trust boundary**: Host and Forwarded headers are untrusted unless explicitly validated.  
-3) **Provide a safe override** in SSR adapter (`@angular/ssr/node`) to pin the request origin if configured.
+1) **Update Angular‑supplied templates** to avoid `headers.host` by default and instead use a **trusted origin** (env/allowlist) for the SSR URL.
+2) **Document the trust boundary**: `Host` and `X‑Forwarded-*` are untrusted unless explicitly validated/allow‑listed by the deployment.
+3) **Add a safe override** in the SSR adapter (`@angular/ssr/node`) to pin the request origin if configured (opt‑in, non‑breaking).
 
 ---
 

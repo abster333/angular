@@ -1,0 +1,80 @@
+Response to Google follow‑up — SSRF in Angular SSR defaults
+
+Attachment: ssrf-standalone.zip (standalone repro bundle)
+
+Thanks for the questions. Below are direct answers plus a minimal repro and attack scenario.
+
+Short answers
+1) How could this be exploited against other users?
+This is a server‑side issue. The attacker sends a request to the SSR endpoint and receives the SSR HTML response. If the app performs relative SSR HttpClient calls, the attacker can steer those server‑side requests to internal hosts and receive the internal data in their own response. No victim browser interaction is required.
+
+2) Who controls those headers, and how?
+- Host is attacker‑controlled on direct requests to the SSR server.
+- X‑Forwarded‑Host / X‑Forwarded‑Proto become attacker‑controlled when a proxy or load balancer forwards these headers without strict validation or allow‑listing. Angular’s own templates/adapter use these headers to construct the SSR URL by default.
+
+3) What is the concrete security impact?
+Internal data exfiltration into SSR HTML. The repros show an internal secret returned by an internal service (127.0.0.1:4401) rendered into the SSR HTML when the Host header is set to that internal host. This is not a “request‑only” SSRF; the response content is observable by the attacker.
+
+4) Can you demonstrate it on an Angular SSR app?
+Yes. I will attach a **standalone repro bundle** (`ssrf-standalone/`) that contains three harnesses (A/B/C). Everything needed is inside that folder (except the Angular repo required for Harness C).
+
+Attack scenario (who / how / impact)
+Attacker: Any remote client who can send HTTP requests to the SSR endpoint.
+Goal: Access internal services reachable only from the SSR server and exfiltrate the response.
+Steps:
+1) Attacker sends a request with a crafted Host (or X‑Forwarded‑Host via misconfigured proxy).
+2) Angular SSR derives the base URL from that header and resolves relative SSR HttpClient requests against it.
+3) SSR fetches internal data and embeds it into the HTML.
+4) Attacker receives the SSR HTML and extracts the internal data.
+
+Standalone reproduction bundle
+Files provided in: ssrf-standalone/ (README.md, package.json, server.ts, tsconfig.json, harnesses/)
+1) cd ssrf-standalone
+2) npm install
+3) npm run start
+4) curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4400/
+Expected: HTML includes INTERNAL_SECRET_123.
+
+Harness A (Standalone) — what it proves
+- Uses only published @angular/* packages.
+- Shows SSR resolves a relative HttpClient request (/secret) against a Host‑derived base.
+- Produces HTML containing INTERNAL_SECRET_123 (server‑side data exfiltration).
+
+Harness B (Minimal SSR app, bundle)
+Purpose: same logic as the original minimal app, but runnable from the bundle.
+Run:
+1) npm run run:minimal
+2) curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4400/
+Expected: HTML includes INTERNAL_SECRET_123.
+Why it works: the SSR URL is built from Host, and relative /secret is rewritten to that origin.
+
+Harness C (Stock Angular SSR example, bundle + Angular repo)
+Purpose: demonstrates exploitability in Angular’s stock ngmodule SSR example.
+Run:
+1) export ANGULAR_REPO=/path/to/angular
+2) corepack pnpm -C "$ANGULAR_REPO/integration/platform-server" install
+3) corepack pnpm -C "$ANGULAR_REPO/integration/platform-server" build:ngmodule
+4) corepack pnpm -C "$ANGULAR_REPO/integration/platform-server" serve:ngmodule
+5) npm run run:stock:api (from ssrf-standalone/)
+6) curl -H 'Host: 127.0.0.1:4401' http://127.0.0.1:4206/http-transferstate-lazy
+Expected: HTML includes INTERNAL_SECRET_123 in the .two div.
+Why it works: the stock server constructs `url` from headers.host, so the relative `/api-2` SSR fetch is redirected to the internal mock API.
+
+Where the behavior comes from (code path)
+1) CLI server template (server-builder)
+   - node_modules/@schematics/angular/ssr/files/server-builder/server.ts.template
+   - url: `${protocol}://${headers.host}${originalUrl}`
+2) Node SSR adapter (application-builder)
+   - node_modules/@angular/ssr/fesm2022/node.mjs (createRequestUrl)
+   - uses X‑Forwarded‑Host / Host to build the URL
+3) platform‑server uses the base URL without validation
+   - packages/platform-server/src/location.ts (INITIAL_CONFIG.url)
+4) Relative SSR HttpClient requests resolve against that base
+   - packages/platform-server/src/http.ts (relativeUrlsTransformerInterceptorFn)
+
+Notes
+- Harness A runs without the Angular repo.
+- Harness B runs the minimal SSR app using the same bundle dependencies.
+- Harness C uses the Angular repo’s stock ngmodule example plus the bundle’s mock API.
+- The issue is about untrusted headers becoming the SSR origin by default in Angular‑supplied scaffolding/adapter code.
+- Impact depends on relative SSR data fetches, which are common in SSR apps.

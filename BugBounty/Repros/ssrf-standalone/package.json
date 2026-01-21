@@ -1,0 +1,25 @@
+{
+  "name": "ssrf-standalone",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx server.ts",
+    "run:minimal": "tsx --tsconfig harnesses/ssrf-ssr-app/tsconfig.json harnesses/ssrf-ssr-app/server.ts",
+    "run:stock:api": "node harnesses/ssrf-stock-ngmodule/internal-api.js"
+  },
+  "dependencies": {
+    "@angular/common": "^17.0.0",
+    "@angular/compiler": "^17.0.0",
+    "@angular/core": "^17.0.0",
+    "@angular/platform-browser": "^17.0.0",
+    "@angular/platform-server": "^17.0.0",
+    "rxjs": "^7.8.0",
+    "tslib": "^2.6.0",
+    "xhr2": "^0.2.1",
+    "zone.js": "^0.14.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0"
+  }
+}

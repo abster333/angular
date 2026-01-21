@@ -474,3 +474,141 @@
   - No token leakage vectors found
 - Links (issues/PRs/commits/docs):
   - Historical: GHSA-58c5-g7wp-6w37 (Nov 2025) - Protocol-relative URL bypass (was fixed)
+
+## 2025-12-29 (Session 2)
+
+### V-017 — [Sanitization] Post-CVE Sanitizer Hardening Review
+- Status: ❌
+- Hypothesis: The Dec 2025 CVE fix (GHSA-v4hv-rgfq-gp49) for SVG animation/MathML XSS may have incomplete coverage or related gaps.
+- Code surfaces touched (paths):
+  - `packages/core/src/sanitization/html_sanitizer.ts` - Main HTML sanitization logic
+  - `packages/core/src/sanitization/sanitization.ts` - Core sanitization functions
+  - `packages/compiler/src/schema/dom_security_schema.ts` - Security context mapping
+  - `packages/compiler/src/template/pipeline/src/phases/resolve_sanitizers.ts` - Compiler phase
+  - `packages/core/src/sanitization/iframe_attrs_validation.ts` - iframe security enforcement
+- Repro attempt:
+  - Command(s): Code review and analysis
+  - Test(s) added/modified: None required
+- Observed result:
+  - Dec 2025 fix introduced `SecurityContext.ATTRIBUTE_NO_BINDING` (value 6)
+  - SVG animation `attributeName` bindings are now blocked at compile-time
+  - iframe security-sensitive attributes (`sandbox`, `allow`, etc.) cannot be bound dynamically
+  - Runtime validation via `ɵɵvalidateAttribute()` throws error for blocked bindings
+  - MathML elements now have href/xlink:href mapped to URL security context
+  - HTML sanitizer explicitly excludes SVG (line 100-102 comment: intentional for security)
+  - mXSS protection (5 parsing iterations), DOM clobbering prevention are in place
+- Expected result:
+  - If gaps exist, dangerous bindings would be possible
+- Notes / next step:
+  - **NOT A BUG** - Sanitizer is well-hardened after recent CVE fix
+  - Architecture intentionally limits features (no SVG in innerHTML) for security
+  - Compile-time and runtime validation work together for defense-in-depth
+- Links (issues/PRs/commits/docs):
+  - Commit: 1c6b0704fb (Dec 1, 2025) - CVE fix
+
+### V-018 — [Forms] ReDoS in Pattern Validator
+- Status: ⚠️
+- Hypothesis: The pattern validator accepts arbitrary regex without complexity checking, potentially allowing DoS via catastrophic backtracking patterns like `(a+)+$`.
+- Code surfaces touched (paths):
+  - `packages/forms/src/validators.ts:569-596` - `patternValidator` function
+  - `packages/forms/src/directives/validators.ts:682-698` - `PatternValidator` directive
+- Repro attempt:
+  - Command(s): Code review
+  - Test(s) added/modified: None
+- Observed result:
+  - Pattern validator uses standard JavaScript `regex.test(value)` without protection
+  - Accepts both string patterns (converted to regex) and RegExp objects directly
+  - No timeout, complexity limits, or regex validation
+  - g/y flags issue is documented but NOT enforced at runtime
+- Expected result:
+  - Catastrophic regex patterns would cause browser thread blocking
+- Root Cause Analysis:
+  - Pattern is set by developer in code, NOT from user input
+  - To exploit, attacker would need to social engineer a developer to use a bad pattern
+  - This is a "developer footgun" rather than a direct security vulnerability
+  - All regex libraries have this fundamental limitation
+- Notes / next step:
+  - **NOT A SECURITY BUG** - Developer responsibility, pattern not user-controlled
+  - Could be improved with regex complexity warnings in dev mode
+  - g/y flag enforcement at runtime would be a good enhancement
+- Links (issues/PRs/commits/docs):
+  - Documentation warns about g/y flags (lines 388-405)
+
+### V-019 — [Router] Guard Race Conditions
+- Status: ❌
+- Hypothesis: Router guards using `switchMap` and `mergeMap` could allow race conditions where guards from one navigation execute after a new navigation supersedes it.
+- Code surfaces touched (paths):
+  - `packages/router/src/navigation_transition.ts:441-465` - Navigation pipeline with switchMap
+  - `packages/router/src/operators/check_guards.ts:84-110` - Guard execution
+  - `packages/router/src/operators/prioritized_guard_value.ts:18-45` - Guard result prioritization
+- Repro attempt:
+  - Command(s): Code review
+  - Test(s) added/modified: None
+- Observed result:
+  - Router uses navigation ID checking (line 454) to detect superseded navigations
+  - Comment acknowledges RxJS issue #7455 about switchMap timing
+  - `shouldContinueNavigation()` function checks current vs transition ID
+  - Additional ID check at line 520: `if (t.id !== this.navigationId)`
+  - `prioritizedGuardValue()` correctly processes guards in declaration order using for-loop
+  - `runCanActivateChecks` uses `concatMap` for sequential guard execution
+  - Existing test coverage for navigation cancellation (guards.spec.ts:1655-1660)
+- Expected result:
+  - If vulnerable, superseded navigation guards could still complete and affect state
+- Notes / next step:
+  - **NOT A BUG** - Router has proper ID-based mitigation for race conditions
+  - Multiple layers of protection against superseded navigation processing
+  - Active maintenance (recent refactoring commits) indicates this is monitored
+- Links (issues/PRs/commits/docs):
+  - RxJS issue #7455 referenced in code comments
+
+### V-020 — [Hydration] blockEventQueue Module-Level Variable Isolation
+- Status: ❌
+- Hypothesis: The module-level `blockEventQueue` in event_replay.ts is shared across Angular apps on the same page, potentially causing cross-app event contamination for defer blocks with matching IDs.
+- Code surfaces touched (paths):
+  - `packages/core/src/hydration/event_replay.ts:63` - `let blockEventQueue = []` (module-level)
+  - `packages/core/src/hydration/event_replay.ts:298` - `blockEventQueue.push({event, currentTarget})`
+  - `packages/core/src/hydration/event_replay.ts:302-317` - `replayQueuedBlockEvents()`
+  - `packages/core/src/event_delegation_utils.ts:104-112` - `invokeListeners()`
+- Repro attempt:
+  - Command(s): Code review and architecture analysis
+  - Test(s) added/modified: None
+- Observed result:
+  - `blockEventQueue` IS module-level and shared across apps
+  - HOWEVER, `invokeListeners()` at line 106 checks `currentTarget?.isConnected`
+  - When an app is destroyed, its DOM elements are removed and `isConnected` becomes false
+  - Events from destroyed apps would fail to replay (silently dropped)
+  - Events are tied to specific DOM elements via `currentTarget`
+  - The `__jsaction_fns` handlers are stored on the element itself, not globally
+- Expected result:
+  - If vulnerable, events from App A would replay with App B's handlers
+- Root Cause Analysis:
+  - The `isConnected` check provides sufficient protection against cross-app contamination
+  - Events for disconnected elements are silently dropped, not re-queued
+  - Minor memory retention (events stay in queue until replay is attempted) but not a security issue
+- Notes / next step:
+  - **NOT A BUG** - isConnected check provides adequate protection
+  - Could be improved by clearing queue on app destruction, but current behavior is safe
+  - Events from destroyed apps can't affect active apps due to element-level handler storage
+- Links (issues/PRs/commits/docs):
+  - Existing multi-app test at event_replay_spec.ts:115-172
+
+### V-002 — [Service Worker] Glob Escape Bypass
+- Status: ✅ **CONFIRMED BUG**
+- Hypothesis: `globToRegex` in `packages/service-worker/config/src/glob.ts` fails to escape regex special characters `(`, `)`, `|`, allowing unintended regex groups and exclusion bypass.
+- Code surfaces touched (paths):
+  - `packages/service-worker/config/src/glob.ts:13-18` - `TO_ESCAPE_BASE` definition
+  - `packages/service-worker/config/src/glob.ts:21-45` - `globToRegex` function
+- Repro attempt:
+  - Test(s) added: `packages/service-worker/config/test/glob_security_spec.ts`
+  - Command: `pnpm test -- //packages/service-worker/config/test:test`
+- Observed result:
+  - `globToRegex('/files/foo(1).txt')` returns `\/files\/foo(1)\.txt` (unintended group).
+  - `globToRegex('/files/a|b.txt')` returns `\/files\/a|b\.txt` (unintended alternation).
+  - Exclusion `!secret(1).txt` generates `^secret(1)\.txt$`, which fails to match `secret(1).txt`, allowing it to be included if a broader rule matches.
+- Expected result:
+  - `globToRegex` should escape `(`, `)`, `|` to prevent regex injection.
+  - `secret(1).txt` should be correctly excluded.
+- Notes / next step:
+  - **SECURITY BUG** - Can lead to sensitive file leakage if exclusions fail.
+  - Fix: Update `TO_ESCAPE_BASE` to include `(`, `)`, `|`.
+
