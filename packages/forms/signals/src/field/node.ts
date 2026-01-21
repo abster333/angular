@@ -7,7 +7,7 @@
  */
 
 import {computed, linkedSignal, type Signal, untracked, type WritableSignal} from '@angular/core';
-import type {Field} from '../api/field_directive';
+import type {FormField} from '../api/form_field_directive';
 import {
   MAX,
   MAX_LENGTH,
@@ -78,6 +78,39 @@ export class FieldNode implements FieldState<unknown> {
     this.nodeState = this.fieldAdapter.createNodeState(this, options);
     this.metadataState = new FieldMetadataState(this);
     this.submitState = new FieldSubmitState(this);
+  }
+
+  focusBoundControl(options?: FocusOptions): void {
+    this.getBindingForFocus()?.focus(options);
+  }
+
+  /**
+   * Gets the Field directive binding that should be focused when the developer calls
+   * `focusBoundControl` on this node.
+   *
+   * This will prioritize focusable bindings to this node, and if multiple exist, it will return
+   * the first one in the DOM. If no focusable bindings exist on this node, it will return the
+   * first focusable binding in the DOM for any descendant node of this one.
+   */
+  private getBindingForFocus():
+    | (FormField<unknown> & {focus: (options?: FocusOptions) => void})
+    | undefined {
+    // First try to focus one of our own bindings.
+    const own = this.formFieldBindings()
+      .filter(
+        (b): b is FormField<unknown> & {focus: (options?: FocusOptions) => void} =>
+          b.focus !== undefined,
+      )
+      .reduce(
+        firstInDom<FormField<unknown> & {focus: (options?: FocusOptions) => void}>,
+        undefined,
+      );
+    if (own) return own;
+    // Fallback to focusing the bound control for one of our children.
+    return this.structure
+      .children()
+      .map((child) => child.getBindingForFocus())
+      .reduce(firstInDom, undefined);
   }
 
   /**
@@ -156,8 +189,8 @@ export class FieldNode implements FieldState<unknown> {
     return this.nodeState.readonly;
   }
 
-  get fieldBindings(): Signal<readonly Field<unknown>[]> {
-    return this.nodeState.fieldBindings;
+  get formFieldBindings(): Signal<readonly FormField<unknown>[]> {
+    return this.nodeState.formFieldBindings;
   }
 
   get submitting(): Signal<boolean> {
@@ -204,9 +237,10 @@ export class FieldNode implements FieldState<unknown> {
    * Marks this specific field as touched.
    */
   markAsTouched(): void {
-    this.nodeState.markAsTouched();
-    this.pendingSync()?.abort();
-    this.sync();
+    untracked(() => {
+      this.nodeState.markAsTouched();
+      this.flushSync();
+    });
   }
 
   /**
@@ -245,9 +279,11 @@ export class FieldNode implements FieldState<unknown> {
    * the field's {@link value} signal, depending on the debounce configuration.
    */
   setControlValue(newValue: unknown): void {
-    this._controlValue.set(newValue);
-    this.markAsDirty();
-    this.debounceSync();
+    untracked(() => {
+      this._controlValue.set(newValue);
+      this.markAsDirty();
+      this.debounceSync();
+    });
   }
 
   /**
@@ -255,6 +291,17 @@ export class FieldNode implements FieldState<unknown> {
    */
   private sync() {
     this.value.set(this.controlValue());
+  }
+
+  /**
+   * If there is a pending sync, abort it and sync immediately.
+   */
+  private flushSync() {
+    const pending = this.pendingSync();
+    if (pending && !pending.signal.aborted) {
+      pending.abort();
+      this.sync();
+    }
   }
 
   /**
@@ -352,4 +399,15 @@ const FALSE = computed(() => false);
 export interface ParentFieldNode extends FieldNode {
   readonly value: WritableSignal<Record<string, unknown>>;
   readonly structure: FieldNodeStructure & {value: WritableSignal<Record<string, unknown>>};
+}
+
+/** Given two elements, returns the one that appears earlier in the DOM. */
+function firstInDom<T extends FormField<unknown>>(
+  a: T | undefined,
+  b: T | undefined,
+): T | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const position = a.element.compareDocumentPosition(b.element);
+  return position & Node.DOCUMENT_POSITION_PRECEDING ? b : a;
 }

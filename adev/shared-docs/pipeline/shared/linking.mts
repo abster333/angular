@@ -18,6 +18,14 @@ const LINK_EXEMPT = new Set([
   'readonly',
   'disabled',
   'hidden',
+  'state',
+  'group',
+  'animation',
+  'transition',
+  'trigger',
+  'group()',
+  'keyframes',
+  '@keyframes',
 ]);
 
 export function shouldLinkSymbol(symbol: string): boolean {

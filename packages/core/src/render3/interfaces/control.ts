@@ -8,11 +8,11 @@
 import {Signal} from '../reactivity/api';
 import {WritableSignal} from '../reactivity/signal';
 
-/** A unique symbol used to identify {@link ɵControl} implementations. */
+/** A unique symbol used to identify {@link ɵFormFieldDirective} implementations. */
 export const ɵCONTROL: unique symbol = Symbol('CONTROL');
 
 /**
- * Instructions for dynamically binding a {@link ɵControl} to a form control.
+ * Instructions for dynamically binding a {@link ɵFormFieldDirective} to a form control.
  */
 export interface ɵControlBinding {
   create(): void;
@@ -22,14 +22,16 @@ export interface ɵControlBinding {
 /**
  * A directive that binds a {@link ɵFieldState} to a form control.
  */
-export interface ɵControl<T> {
+export interface ɵFormFieldDirective<T> {
   /**
-   * The presence of this property is used to identify {@link ɵControl} implementations, while the
-   * value is used to store the instructions for dynamically binding to a form control. The
-   * instructions are stored on the directive so that they can be tree-shaken when the directive is
-   * not used.
+   * The presence of this property is used to identify {@link ɵFormFieldDirective} implementations,
+   * while the value is used to store the instructions for dynamically binding to a form control.
+   * The instructions are stored on the directive so that they can be tree-shaken when the directive
+   * is not used.
    */
   readonly [ɵCONTROL]: ɵControlBinding;
+
+  readonly element: HTMLElement;
 
   /** The state of the field bound to this control. */
   readonly state: Signal<ɵFieldState<T>>;
@@ -48,7 +50,13 @@ export interface ɵControl<T> {
    * the component will forward the bound field to another field directive in its own template,
    * and do nothing.
    */
-  ɵregister(): void;
+  registerAsBinding(bindingOptions?: ɵFormFieldBindingOptions): void;
+}
+
+/** A custom UI control for signal forms. */
+export interface ɵFormFieldBindingOptions {
+  /** Focuses the custom control. */
+  focus?(options?: FocusOptions): void;
 }
 
 /** Mirrors the `ControlValueAccessor` interface for interoperability.  */

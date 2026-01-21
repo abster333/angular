@@ -11,14 +11,8 @@ import * as o from '../output/output_ast';
 const CORE = '@angular/core';
 
 export class Identifiers {
-  /* Methods */
-  static NEW_METHOD = 'factory';
-  static TRANSFORM_METHOD = 'transform';
-  static PATCH_DEPS = 'patchedDeps';
-
   static core: o.ExternalReference = {name: null, moduleName: CORE};
 
-  /* Instructions */
   static namespaceHTML: o.ExternalReference = {name: 'ɵɵnamespaceHTML', moduleName: CORE};
 
   static namespaceMathML: o.ExternalReference = {name: 'ɵɵnamespaceMathML', moduleName: CORE};
@@ -420,6 +414,8 @@ export class Identifiers {
   static declareLet: o.ExternalReference = {name: 'ɵɵdeclareLet', moduleName: CORE};
   static storeLet: o.ExternalReference = {name: 'ɵɵstoreLet', moduleName: CORE};
   static readContextLet: o.ExternalReference = {name: 'ɵɵreadContextLet', moduleName: CORE};
+
+  static arrowFunction: o.ExternalReference = {name: 'ɵɵarrowFunction', moduleName: CORE};
 
   static attachSourceLocations: o.ExternalReference = {
     name: 'ɵɵattachSourceLocations',

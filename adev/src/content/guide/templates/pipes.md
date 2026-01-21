@@ -26,7 +26,7 @@ import { CurrencyPipe, DatePipe, TitleCasePipe } from '@angular/common';
     </main>
   `,
 })
-export class ShoppingCartComponent {
+export class ShoppingCart {
   amount = 123.45;
   company = 'acme corporation';
   purchasedOn = '2024-07-08';
@@ -271,7 +271,7 @@ export class MyCustomTransformationPipe implements PipeTransform {
 
 When you want a pipe to detect changes within arrays or objects, it must be marked as an impure function by passing the `pure` flag with a value of `false`.
 
-Avoid creating impure pipes unless absolutely necessary, as they can incur a significant performance penalty if used without care.
+IMPORTANT: Avoid creating impure pipes unless absolutely necessary, as they can incur a significant performance penalty if used without care.
 
 ```angular-ts
 import { Pipe, PipeTransform } from '@angular/core';

@@ -155,7 +155,7 @@ export function form<TModel>(
  * ```ts
  * const nameForm = form(signal({first: '', last: ''}), (name) => {
  *   required(name.first);
- *   validate(name.last, ({value}) => !/^[a-z]+$/i.test(value()) ? customError({kind: 'alphabet-only'}) : undefined);
+ *   validate(name.last, ({value}) => !/^[a-z]+$/i.test(value()) ? {kind: 'alphabet-only'} : undefined);
  * });
  * nameForm().valid(); // false
  * nameForm().value.set({first: 'John', last: 'Doe'});
@@ -332,7 +332,7 @@ export function applyWhenValue(
 /**
  * Submits a given `FieldTree` using the given action function and applies any submission errors
  * resulting from the action to the field. Submission errors returned by the `action` will be integrated
- * into the field as a `ValidationError` on the sub-field indicated by the `field` property of the
+ * into the field as a `ValidationError` on the sub-field indicated by the `fieldTree` property of the
  * submission error.
  *
  * @example
@@ -341,8 +341,9 @@ export function applyWhenValue(
  *   const result = await myClient.registerNewUser(registrationForm().value());
  *   if (result.errorCode === myClient.ErrorCode.USERNAME_TAKEN) {
  *     return [{
- *       field: registrationForm.username,
- *       error: {kind: 'server', message: 'Username already taken'}
+ *       fieldTree: registrationForm.username,
+ *       kind: 'server',
+ *       message: 'Username already taken'
  *     }];
  *   }
  *   return undefined;
